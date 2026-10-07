@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Debian Terminal Simulator</title>
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;width:100%;height:100%;background:#111;color:#eee;font-family:ui-monospace,SFMono-Regular,Consolas,Monaco,monospace}
+body{overflow:hidden}
+#terminal{height:100%;display:flex;flex-direction:column;background:#111}
+#bar{height:34px;flex:none;background:#252525;border-bottom:1px solid #444;display:flex;align-items:center;padding:0 12px;color:#bbb;font-size:13px}
+.dot{width:10px;height:10px;border-radius:50%;background:#777;margin-right:7px}
+#screen{flex:1;overflow:auto;padding:14px 16px 30px;line-height:1.45;font-size:14px;white-space:pre-wrap;word-break:break-word}
+.line{margin:0}
+.prompt{color:#79d279}.path{color:#65b7ff}.cmd{color:#fff}
+.out{color:#ddd}.err{color:#ff7777}.info{color:#aaa}.ok{color:#78e08f}
+#inputrow{display:flex;align-items:center;padding:10px 16px 18px;gap:0;min-height:48px;background:#111}
+#prompt{white-space:pre;color:#79d279}
+#input{flex:1;min-width:0;display:block;background:transparent;border:0;outline:0;color:#fff;font:inherit;font-size:16px;caret-color:#fff;padding:2px 0;touch-action:manipulation}
+</style>
+</head>
+<body>
+<div id="terminal" tabindex="0" role="application">
+  <div id="bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span>&nbsp; Debian GNU/Linux — Terminal Simulator</div>
+  <div id="screen"></div>
+  <div id="inputrow"><span id="prompt"></span><input id="input" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
+</div>
+
+<script>
+"use strict";
+
+/*
+ * Debian Terminal Simulator
+ * 纯 HTML/CSS/JavaScript，无后端。
+ * 注意：这是模拟器，不是真正的 Debian shell，apt/install 等不会修改真实设备。
+ */
+
+const screen = document.getElementById("screen");
+const input = document.getElementById("input");
+const promptEl = document.getElementById("prompt");
+
+const state = {
+  user:"admin", host:"kugx", cwd:"/home/admin",
+  history:[], histPos:0, env:{
+    HOME:"/home/admin", USER:"admin", LOGNAME:"admin",
+    SHELL:"/bin/bash", TERM:"xterm-256color", LANG:"zh_CN.UTF-8",
+    PATH:"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  },
+  fs:{
+    "/":{type:"dir",mode:"drwxr-xr-x"},
+    "/bin":{type:"dir",mode:"drwxr-xr-x"},
+    "/etc":{type:"dir",mode:"drwxr-xr-x"},
+    "/home":{type:"dir",mode:"drwxr-xr-x"},
+    "/home/admin":{type:"dir",mode:"drwxr-xr-x"},
+    "/home/admin/Documents":{type:"dir",mode:"drwxr-xr-x"},
+    "/home/admin/Downloads":{type:"dir",mode:"drwxr-xr-x"},
+    "/home/admin/.bashrc":{type:"file",content:"# ~/.bashrc\\nexport PS1='\\\\u@\\\\h:\\\\w\\\\$ '"},
+    "/etc/hostname":{type:"file",content:"kugx"},
+    "/etc/os-release":{type:"file",content:'PRETTY_NAME="Debian GNU/Linux 13 (trixie)"\\nNAME="Debian GNU/Linux"\\nID=debian\\nVERSION_ID="13"\\nVERSION_CODENAME=trixie'},
+    "/tmp":{type:"dir",mode:"drwxrwxrwt"},
+    "/usr":{type:"dir",mode:"drwxr-xr-x"},
+    "/usr/bin":{type:"dir",mode:"drwxr-xr-x"},
+    "/var":{type:"dir",mode:"drwxr-xr-x"},
+    "/var/log":{type:"dir",mode:"drwxr-xr-x"},
+    "/var/cache":{type:"dir",mode:"drwxr-xr-x"},
+    "/var/lib":{type:"dir",mode:"drwxr-xr-x"},
+    "/var/lib/dpkg":{type:"dir",mode:"drwxr-xr-x"}
+  },
+  installed:new Set(["bash","coreutils","dpkg","apt","debianutils","grep","sed","gawk","tar","gzip","nano","vim-tiny"])
+};
+
+const commands = [
+"alias","apropos","visit","apt","apt-cache","apt-get","apt-mark","awk","basename","bash","bc",
+"cat","cd","chmod","chown","chgrp","cksum","clear","cmp","comm","command","cp","cut",
+"date","dd","df","diff","dirname","dmesg","du","echo","env","eval","exec","exit","export",
+"false","fgrep","file","find","fold","free","getent","grep","groups","gunzip","gzip","head",
+"help","history","hostname","id","ifconfig","ip","jobs","kill","less","ln","locale","locate",
+"ls","lsblk","lsof","man","mkdir","more","mount","mv","nano","nc","netstat","nice","nohup",
+"passwd","ping","pkill","printf","ps","pwd","readlink","realpath","reboot","rm","rmdir",
+"sed","seq","shutdown","sleep","sort","source","stat","strings","su","sudo","tail","tar",
+"tee","test","time","touch","tr","true","tty","type","uname","uniq","uptime","users",
+"vi","vim","wc","which","who","whoami","xargs","yes","zip","unzip","systemctl","service",
+"journalctl","dpkg","python3","node","npm","curl","wget","ssh","scp","git","nano","neofetch"
+];
+
+function esc(s){return String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
+function print(text="", cls="out"){
+  const d=document.createElement("div"); d.className="line "+cls; d.innerHTML=esc(text).replace(/\n/g,"<br>");
+  screen.appendChild(d); screen.scrollTop=screen.scrollHeight;
+}
+function printHTML(html,cls="out"){
+  const d=document.createElement("div");d.className="line "+cls;d.innerHTML=html;screen.appendChild(d);screen.scrollTop=screen.scrollHeight;
+}
+function pathNorm(p){
+  let base=p.startsWith("/")?p:state.cwd+"/"+p;
+  let parts=[];
+  base.split("/").forEach(x=>{if(!x||x===".")return;if(x==="..")parts.pop();else parts.push(x)});
+  return "/"+parts.join("/");
+}
+function expand(p){
+  if(!p) return state.cwd;
+  if(p==="~"||p.startsWith("~/")) return pathNorm(state.env.HOME+p.slice(1));
+  return pathNorm(p);
+}
+function basename(p){return p.split("/").filter(Boolean).pop()||"/"}
+function dirname(p){let a=p.split("/").filter(Boolean);a.pop();return "/"+a.join("/")}
+function exists(p){return !!state.fs[p]}
+function isDir(p){return exists(p)&&state.fs[p].type==="dir"}
+function ensureParent(p){return exists(dirname(p))&&isDir(dirname(p))}
+function argsplit(s){
+  const a=[]; let cur="", q=null;
+  for(let i=0;i<s.length;i++){let c=s[i];
+    if(q){if(c===q)q=null;else if(c==="\\\\"){cur+=s[++i]??""}else cur+=c}
+    else if(c==="'"||c==='"')q=c;
+    else if(/\s/.test(c)){if(cur){a.push(cur);cur=""}}
+    else cur+=c;
+  }
+  if(cur)a.push(cur); return a;
+}
+function displayPrompt(){
+  promptEl.innerHTML='<span class="prompt">'+esc(state.user+"@"+state.host)+'</span>:'+
+    '<span class="path">'+esc(state.cwd==="\/home\/admin"?"~":state.cwd)+'</span>'+
+    '<span class="prompt">$ </span>';
+}
+function commandLine(s){
+  printHTML('<span class="prompt">'+esc(state.user+"@"+state.host)+'</span>:'+
+    '<span class="path">'+esc(state.cwd==="\/home\/admin"?"~":state.cwd)+'</span>'+
+    '<span class="prompt">$ </span><span class="cmd">'+esc(s)+'</span>');
+}
+function writeFile(p,c){state.fs[p]={type:"file",content:c,mode:"-rw-r--r--"}}
+function mkdir(p){state.fs[p]={type:"dir",mode:"drwxr-xr-x"}}
+function children(p){
+  let pre=p==="/"?"/":p+"/", set=new Set();
+  Object.keys(state.fs).forEach(k=>{if(k.startsWith(pre)){let rest=k.slice(pre.length);if(rest&&!rest.includes("/"))set.add(rest)}});return [...set].sort();
+}
+function parseOpts(a){
+  let opts=[],rest=[];a.forEach(x=>x.startsWith("-")?opts.push(x):rest.push(x));return {opts,rest}
+}
+
+function run(cmdline){
+  const raw=cmdline.trim(); if(!raw)return;
+  state.history.push(raw); state.histPos=state.history.length;
+  commandLine(raw);
+  let a=argsplit(raw), cmd=a.shift();
+  if(cmd.startsWith("sudo ")){cmdline=raw.slice(5);a=argsplit(cmdline);cmd=a.shift()}
+  if(cmd===""){return}
+  if(cmd.includes("=")&&!cmd.startsWith("=")&&!["echo"].includes(cmd)){let k=cmd.split("=")[0];if(/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)){state.env[k]=cmd.slice(k.length+1);return}}
+  if(cmd==="exit"){print("logout","info");return}
+  const f=handlers[cmd];
+  if(f){try{f(a)}catch(e){print("bash: "+cmd+": "+e.message,"err")}return}
+  print("bash: "+cmd+": command not found","err");
+}
+
+const handlers = {
+visit(a){
+  if(!a.length){
+    print("visit: missing URL", "err");
+    print("用法: visit https://example.com", "info");
+    return;
+  }
+  let url=a[0];
+  if(!/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(url)) url="https://"+url;
+  try {
+    const u=new URL(url);
+    if(!["http:","https:"].includes(u.protocol)){
+      print("visit: 只允许访问 http:// 或 https:// 地址", "err");
+      return;
+    }
+    print("Opening " + u.href + " ...", "info");
+    window.open(u.href, "_blank");
+  } catch(e) {
+    print("visit: invalid URL: " + url, "err");
+  }
+},
+help(a){
+ print("Debian Terminal Simulator — 可用命令：","info");
+ print(commands.join("  "));
+ print("\\n常用：ls cd pwd mkdir touch cat echo cp mv rm grep find chmod chown tar zip unzip");
+ print("系统：uname hostname id whoami ps top free df du uptime date env export history");
+ print("Debian：apt apt-get apt-cache apt-mark dpkg");
+ print("网络：ip ifconfig ping curl wget ssh scp");
+ print("编辑器：nano vi vim");
+ print("模拟器专用：help neofetch clear reset");
+ print("\\n提示：这是浏览器中的虚拟 Linux 文件系统，不会执行真实系统命令。","info");
+},
+clear(){screen.innerHTML=""},
+reset(){location.reload()},
+pwd(){print(state.cwd)},
+whoami(){print(state.user)},
+hostname(){print(state.host)},
+id(){print(`uid=1000(admin) gid=1000(admin) groups=1000(admin),27(sudo),100(users)`)},
+groups(){print("admin sudo users")},
+users(){print("admin")},
+tty(){print("/dev/pts/0")},
+uname(a){let {opts}=parseOpts(a);if(opts.includes("-a"))print("Linux kugx 6.12.0-amd64 #1 SMP Debian 6.12.48 x86_64 GNU/Linux");else if(opts.includes("-r"))print("6.12.0-amd64");else print("Linux")},
+"ls"(a){
+ let {opts,rest}=parseOpts(a), p=expand(rest[0]||state.cwd);if(!exists(p)){print(`ls: cannot access '${rest[0]}': No such file or directory`,"err");return}
+ if(!isDir(p)){print(basename(p));return}
+ let list=children(p); if(opts.some(x=>x.includes("a"))) list=[".","..",...list];
+ if(opts.some(x=>x.includes("l"))){
+   list.forEach(n=>{let q=n==="."?p:n===".." ? dirname(p):pathNorm(p+"/"+n),x=state.fs[q]||{};print(`${x.mode||"drwxr-xr-x"} 1 admin admin ${x.type==="file"?(x.content||"").length:4096} Oct  7 13:46 ${n}`)})
+ }else print(list.join("  "));
+},
+cd(a){let p=expand(a[0]||state.env.HOME);if(!isDir(p)){print(`bash: cd: ${a[0]||""}: No such file or directory`,"err");return}state.cwd=p;displayPrompt()},
+mkdir(a){
+ let {opts,rest}=parseOpts(a);if(!rest.length){print("mkdir: missing operand","err");return}
+ rest.forEach(x=>{let p=expand(x);if(exists(p)){print(`mkdir: cannot create directory '${x}': File exists`,"err");return}
+   if(!ensureParent(p)){print(`mkdir: cannot create directory '${x}': No such file or directory`,"err");return}
+   mkdir(p)
+   if(opts.includes("-p")){}
+ })
+},
+touch(a){if(!a.length){print("touch: missing file operand","err");return}a.forEach(x=>{let p=expand(x);if(!exists(p))writeFile(p,"")})},
+cat(a){if(!a.length){print("cat: missing operand","err");return}a.forEach(x=>{let p=expand(x);if(!exists(p)){print(`cat: ${x}: No such file or directory`,"err")}else if(isDir(p)){print(`cat: ${x}: Is a directory`,"err")}else print(state.fs[p].content||"")})},
+"echo"(a){const v=a.join(" ");if(v==="BlueArchive"){print("蔚蓝档案，启动！","ok");}else{print(v)}},
+printf(a){print(a.join(" ").replace(/\\n/g,"\n"))},
+"rm"(a){
+ let {opts,rest}=parseOpts(a);if(!rest.length){print("rm: missing operand","err");return}
+ rest.forEach(x=>{let p=expand(x);if(!exists(p)){print(`rm: cannot remove '${x}': No such file or directory`,"err");return}
+  if(isDir(p)&&!opts.includes("-r")&&!opts.includes("-R")){print(`rm: cannot remove '${x}': Is a directory`,"err");return}
+  Object.keys(state.fs).forEach(k=>{if(k===p|| (isDir(p)&&k.startsWith(p+"/")))delete state.fs[k]})
+ })
+},
+rmdir(a){a.forEach(x=>{let p=expand(x);if(!isDir(p)){print(`rmdir: failed to remove '${x}': No such file or directory`,"err");return}if(children(p).length){print(`rmdir: failed to remove '${x}': Directory not empty`,"err");return}delete state.fs[p]})},
+"cp"(a){if(a.length<2){print("cp: missing destination file operand","err");return}let src=expand(a[0]),dst=expand(a[1]);if(!exists(src)){print(`cp: cannot stat '${a[0]}': No such file or directory`,"err");return}if(isDir(src)){print(`cp: -r not specified; omitting directory '${a[0]}'`,"err");return}writeFile(dst,state.fs[src].content||"")},
+"mv"(a){if(a.length<2){print("mv: missing destination file operand","err");return}let s=expand(a[0]),d=expand(a[1]);if(!exists(s)){print(`mv: cannot stat '${a[0]}': No such file or directory`,"err");return}state.fs[d]=state.fs[s];delete state.fs[s]},
+"head"(a){let p=expand(a.find(x=>!x.startsWith("-"))||"");if(exists(p)&&!isDir(p))print((state.fs[p].content||"").split("\n").slice(0,10).join("\n"));else print("head: cannot open file","err")},
+"tail"(a){let p=expand(a.find(x=>!x.startsWith("-"))||"");if(exists(p)&&!isDir(p))print((state.fs[p].content||"").split("\n").slice(-10).join("\n"));else print("tail: cannot open file","err")},
+"wc"(a){let p=expand(a.find(x=>!x.startsWith("-"))||"");if(!exists(p)||isDir(p)){print("wc: cannot open file","err");return}let s=state.fs[p].content||"";print(`${s.split("\n").length} ${s.trim()?s.trim().split(/\s+/).length:0} ${s.length} ${p}`)},
+"grep"(a){let pattern=a[0],p=a[a.length-1];if(!pattern||!p){print("Usage: grep PATTERN FILE","err");return}p=expand(p);if(!exists(p)||isDir(p)){print(`grep: ${p}: No such file or directory`,"err");return}(state.fs[p].content||"").split("\n").forEach((l,i)=>{if(l.includes(pattern))print(l)})},
+"find"(a){let base=expand(a[0]||".");if(!exists(base)){print(`find: '${a[0]}': No such file or directory`,"err");return}Object.keys(state.fs).filter(k=>k===base||k.startsWith(base==="/" ? "/" : base+"/")).sort().forEach(k=>print(k))},
+"which"(a){let c=a[0];if(commands.includes(c)||state.installed.has(c))print("/usr/bin/"+c);else print(`${c}: not found`,"err")},
+"type"(a){let c=a[0];if(c==="cd")print("cd is a shell builtin");else if(commands.includes(c))print(`${c} is /usr/bin/${c}`);else print(`${c}: not found`)},
+"history"(){state.history.forEach((x,i)=>print(String(i+1).padStart(5)+"  "+x))},
+"date"(){print(new Date().toString())},
+"uptime"(){print("13:46:00 up 2 days,  4:18,  1 user,  load average: 0.08, 0.06, 0.03")},
+"free"(a){print("               total        used        free      shared  buff/cache   available\nMem:        16384000     2048000    12582912       16384     2048000    14336000\nSwap:        2097152           0     2097152")},
+"df"(a){print("Filesystem      Size  Used Avail Use% Mounted on\n/dev/simulated   80G   12G   64G  16% /\ntmpfs            8G     0    8G   0% /tmp")},
+"du"(a){let p=expand(a.find(x=>!x.startsWith("-"))||".");print("4K\\t"+p)},
+"ps"(a){print("    PID TTY          TIME CMD\\n      1 ?        00:00:01 systemd\\n   1024 pts/0    00:00:00 bash\\n   1088 pts/0    00:00:00 "+(a.includes("aux")?"ps":"bash"))},
+"top"(){print("top - Debian simulated task manager\\nTasks: 3 total, 1 running\\n%Cpu(s):  1.0 us,  0.4 sy, 98.6 id\\nPID USER      CPU COMMAND\\n1024 admin     0.1 bash\\n1088 admin     0.0 top")},
+"env"(){Object.entries(state.env).forEach(([k,v])=>print(k+"="+v))},
+"export"(a){a.forEach(x=>{let i=x.indexOf("=");if(i>0)state.env[x.slice(0,i)]=x.slice(i+1)})},
+"clear"( ){screen.innerHTML=""},
+"neofetch"(){print("       .--.          admin@kugx\n      |o_o |         ----------------\n      |:_/ |         OS: Debian GNU/Linux 13 (trixie)\n     //   \\\\ \\\\        Host: kugx\n    (|     | )       Kernel: 6.12.0-amd64\n   /'\\\\_   _/`\\\\       Shell: bash\n   \\\\___)=(___/        Terminal: Debian Simulator\n\n                 Browser sandbox: ENABLED")},
+"apt"(a){aptCommand(a)},
+"apt-get"(a){aptCommand(a)},
+"apt-cache"(a){if(a[0]==="search"){print(`Sorting... Done\\nFull Text Search... Done\\n${a.slice(1).join(" ")} — simulated package`) }else if(a[0]==="policy"){print("Installed: (none)\\nCandidate: simulated") }else print("apt-cache: simulated package cache")},
+"apt-mark"(a){print(a[0]==="showmanual"?[...state.installed].join("\\n"):"apt-mark: simulated")},
+"dpkg"(a){if(a[0]==="-l"){print("Desired=Unknown/Install/Remove/Purge\\n||/ Name                 Version\\nii  "+[...state.installed].join("\\nii  "))}else if(a[0]==="-s"){print("Package: "+(a[1]||"unknown")+"\\nStatus: install ok installed\\nVersion: simulated")}else print("dpkg: simulated Debian package manager")},
+"chmod"(a){if(a.length<2){print("chmod: missing operand","err");return}let p=expand(a[a.length-1]);if(exists(p))state.fs[p].mode=a[0].replace(/^0/,"")||"755";print("")},
+"chown"(a){print("chown: simulated ownership changed")},
+"chgrp"(a){print("chgrp: simulated group changed")},
+"ln"(a){print("ln: symbolic links are simulated")},
+"tar"(a){print("tar: simulated archive operation completed")},
+"zip"(a){print("  adding: "+(a[a.length-1]||"archive")+" (simulated)")},
+"unzip"(a){print("Archive: "+(a[0]||"archive.zip")+"\\n extracting: simulated (simulator)")},
+"gzip"(a){print("gzip: simulated compression complete")},
+"gunzip"(a){print("gunzip: simulated decompression complete")},
+"ping"(a){let host=a.find(x=>!x.startsWith("-"))||"localhost";print(`PING ${host} (${host==="localhost"?"127.0.0.1":"simulated"}) 56(84) bytes of data.\\n64 bytes from ${host}: icmp_seq=1 ttl=64 time=0.042 ms\\n\\n--- ${host} ping statistics ---\\n1 packets transmitted, 1 received, 0% packet loss`)},
+"ip"(a){if(a[0]==="addr"||a[0]==="a")print("1: lo: <LOOPBACK,UP>\\n    inet 127.0.0.1/8\\n2: eth0: <BROADCAST,UP>\\n    inet 192.168.1.100/24");else print("Usage: ip [ addr | link | route ]")},
+"ifconfig"(){print("eth0: flags=4163<UP,BROADCAST,RUNNING>\\n        inet 192.168.1.100  netmask 255.255.255.0\\nlo: flags=73<UP,LOOPBACK,RUNNING>\\n        inet 127.0.0.1")},
+"curl"(a){print("curl: simulated network request\\nHTTP/1.1 200 OK\\n[network access disabled in simulator]")},
+"wget"(a){print("Simulated download: 100% complete\\n[no real file downloaded]")},
+"ssh"(a){print("ssh: simulated connection; no remote shell is opened")},
+"scp"(a){print("scp: simulated file transfer complete")},
+"git"(a){print(a[0]==="--version"?"git version 2.47.2":"git: simulated Git client\\nUse: git status | add | commit | log | clone")},
+"python3"(a){print("Python 3.13.5 (simulated)\\n>>> Interactive Python is not executed by this HTML simulator.")},
+"node"(a){print("v22.14.0 (simulated Node.js)")},
+"npm"(a){print("10.9.2\\nnpm commands are simulated.")},
+"nano"(){print("GNU nano 8.3 (simulated)\\n[ editor UI is not implemented; use cat/touch for the virtual filesystem ]")},
+"vim"(){print("VIM - Vi IMproved 9.1 (simulated)\\n[ editor UI is not implemented ]")},
+"vi"(){print("VIM - Vi IMproved 9.1 (simulated)")},
+"man"(a){let c=a[0]||"bash";print(`${c}(1) — Debian Terminal Simulator\\n\\nNAME\\n    ${c} - simulated Linux command\\n\\nDESCRIPTION\\n    This simulator implements a browser-safe subset of Debian/Linux commands.\\n\\nUse 'help' to see available commands.`)},
+"systemctl"(a){print("System has not been booted with systemd as init system (simulated).\\nFailed to connect to bus: Host is down.")},
+"service"(a){print("service: simulated init script interface")},
+"journalctl"(){print("-- Logs begin at simulated boot time --\\nOct 07 13:42:01 kugx systemd[1]: Started simulated terminal.")},
+"kill"(a){print(`kill: simulated signal ${a[0]||"15"} sent`)},
+"sleep"(a){print("sleep: simulated")},
+"yes"(a){print((a.join(" ")||"y")+"\\n(repetition capped by simulator)")},
+"true"(){},
+"false"(){},
+"reboot"(){print("Broadcast message from admin@kugx: Reboot requested.\\n[simulator does not reboot the browser]")},
+"shutdown"(){print("Shutdown scheduled. [simulator only]")},
+"passwd"(){print("passwd: password changes are unavailable in browser simulator")},
+"su"(a){print("su: authentication is unavailable in browser simulator")},
+"mount"(){print("mount: simulated mount table")},
+"lsof"(){print("COMMAND PID USER FD TYPE DEVICE NAME\\nbash 1024 admin cwd DIR simulated /home/admin")},
+"stat"(a){let p=expand(a[0]||".");if(exists(p)){let x=state.fs[p];print(`  File: ${p}\\n  Size: ${(x.content||"").length}\\n  Type: ${x.type}\\n  Mode: ${x.mode||"-rw-r--r--"}`)}else print(`stat: cannot stat '${p}'`,"err")},
+"basename"(a){print(basename(a[0]||""))},
+"dirname"(a){print(dirname(expand(a[0]||"")))}
+};
+
+function aptCommand(a){
+ const op=a[0], pkgs=a.slice(1).filter(x=>!x.startsWith("-"));
+ if(op==="update"){print("Hit:1 http://deb.debian.org/debian trixie InRelease\\nReading package lists... Done\\nAll packages are up to date. (simulated)","ok");return}
+ if(op==="upgrade"||op==="full-upgrade"){print("0 upgraded, 0 newly installed, 0 to remove. (simulated)","ok");return}
+ if(op==="install"){
+   if(!pkgs.length){print("apt: error: install requires at least one package","err");return}
+   pkgs.forEach(p=>state.installed.add(p));
+   print("Reading package lists... Done\\nBuilding dependency tree... Done\\nThe following NEW packages will be installed:\\n  "+pkgs.join(" ")+"\\nSetting up "+pkgs.join(", ")+" ...\\nDone. (simulated)","ok");return
+ }
+ if(op==="remove"||op==="purge"){pkgs.forEach(p=>state.installed.delete(p));print("Packages removed: "+(pkgs.join(" ")||"(none)")+" (simulated)","ok");return}
+ if(op==="search"){print("Sorting... Done\\nFull Text Search... Done\\n"+(pkgs[0]||"")+" — simulated package result");return}
+ if(op==="list"){print([...state.installed].sort().map(p=>`ii  ${p}  1.0-simulated  amd64`).join("\\n"));return}
+ if(op==="show"){print("Package: "+(pkgs[0]||"unknown")+"\\nVersion: 1.0-simulated\\nArchitecture: amd64\\nDescription: Debian package (simulated)");return}
+ print("apt 3.x — simulated\\nUsage: apt [update|upgrade|install|remove|purge|search|show|list] [packages]");
+}
+
+input.addEventListener("keydown",e=>{
+ if(e.key==="Enter"){let v=input.value;input.value="";run(v);displayPrompt();return}
+ if(e.key==="ArrowUp"){e.preventDefault();if(state.histPos>0){state.histPos--;input.value=state.history[state.histPos]||""}}
+ if(e.key==="ArrowDown"){e.preventDefault();if(state.histPos<state.history.length-1){state.histPos++;input.value=state.history[state.histPos]}else{state.histPos=state.history.length;input.value=""}}
+ if(e.key==="Tab"){e.preventDefault();let v=input.value.split(/\s+/),last=v.pop();let matches=commands.filter(c=>c.startsWith(last));if(matches.length===1){v.push(matches[0]);input.value=v.join(" ")+" "}}
+});
+
+print("Debian GNU/Linux 13 (trixie) — Terminal Simulator");
+print("模拟器已启动。提示符：admin@kugx。点击终端即可输入；输入 help 查看命令。","info");
+print("注意：apt、curl、wget、ssh、systemctl 等均为安全模拟，不会操作真实系统。","info");
+displayPrompt();input.focus();
+document.addEventListener("pointerdown",e=>{ if(e.target!==input) input.focus({preventScroll:true}); });
+document.getElementById("terminal").addEventListener("click",()=>input.focus({preventScroll:true}));
+window.addEventListener("load",()=>input.focus({preventScroll:true}));
+</script>
+</body>
+</html>
